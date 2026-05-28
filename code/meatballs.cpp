@@ -617,7 +617,7 @@ int main()
 			int width = GetScreenWidth();
 			int height = GetScreenHeight();
 
-			DrawRectangle(0, 0, 340, 230, { 232, 232, 232, 255 });
+			DrawRectangle(0, 0, 370, 275, { 232, 232, 232, 255 });
 
 			float margin_x = 110;
 			GuiSliderBar({ margin_x, 30, 120, 20}, "Grid size", TextFormat("%.0f", grid_step), &grid_step, .2f, 2);
@@ -626,9 +626,10 @@ int main()
 			GuiCheckBox({ margin_x, 120, 20, 20 }, "Show projected grid", &global_draw_octree_grid);
 			GuiCheckBox({ margin_x, 150, 20, 20 }, "Show polygons", &global_draw_polygon_wires);
 			GuiCheckBox({ margin_x, 180, 20, 20 }, "Show XY axis", &global_draw_coordinate_axis);
+
+			DrawText("LMB to rotate scene\nRMB to move sphere", 20, 210, 20, GRAY);
 			//------------------------------------------------------------------------------
 			
-			//DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
 		}
         EndDrawing();
     }
