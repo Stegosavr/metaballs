@@ -9,7 +9,59 @@
 #include "stdint.h"
 #include "math.h"
 
+#define internal static
+
 #define ArrayCount(Array) (sizeof(Array) / sizeof((Array)[0]))
+#define Assert(Expression) if (!(Expression)) *(int *)0 = 0;
+#define memory_index size_t
+
+#define Kilobytes(Value) ((Value)*1024ULL)
+#define Megabytes(Value) (Kilobytes(Value)*1024ULL)
+#define Gigabytes(Value) (Megabytes(Value)*1024ULL)
+#define Terabytes(Value) (Gigabytes(Value)*1024ULL)
+
+struct memory_arena
+{
+	memory_index Size;
+	memory_index Used;
+	uint8_t *Base;
+};
+
+internal void
+InitializeArena(memory_arena *Arena, memory_index Size, uint8_t *Base)
+{
+	Arena->Size = Size;
+	Arena->Base = Base;
+	Arena->Used = 0;
+}
+
+#define PushStruct(Arena, type) ((type *)PushSize_(Arena, sizeof(type)))
+#define PushArray(Arena, Count, type) ((type *)PushSize_(Arena, (Count)*sizeof(type)))
+internal void *
+PushSize_(memory_arena *Arena, memory_index Size)
+{
+	Assert((Arena->Used + Size) <= Arena->Size);
+	void *Result = Arena->Base + Arena->Used;
+	Arena->Used += Size;
+
+	return Result;
+}
+
+struct program_memory
+{
+	bool IsInitialized;
+	uint64_t PermanentStorageSize;
+	void *PermanentStorage; // NOTE(casey): REQUIRED to be cleared to zero at startup
+							
+	uint64_t TransientStorageSize;
+	void *TransientStorage; // NOTE(casey): REQUIRED to be cleared to zero at startup
+
+	//debug_platform_read_entire_file *DEBUGPlatformReadEntireFile;
+	//debug_platform_free_file_memory *DEBUGPlatformFreeFileMemory;
+	//debug_platform_write_entire_file *DEBUGPlatformWriteEntireFile;
+};
+
+static program_memory global_program_memory;
 
 int global_draw_surfaces_points_count = 0;
 bool global_draw_coordinate_axis = true;
@@ -92,7 +144,7 @@ struct OctreeCube
 #define OCTREE_RESOLUTION 1
 #define OCTREE_CUBES 8
 #define OCTREE_AXIS_POINTS 3
-void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_step, Vector3 start_point)
+void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena *arena, int index, float axis_step, Vector3 start_point)
 {
 	MetaSphere metasphere = metaspheres[index];
 
@@ -125,7 +177,6 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 	int vertex_edge_offsets[6] = {1, 2, 4, -1, -2, -4};
 	for (int i = 0; i < 8; i++)
 	{
-		Mesh mesh = {0};
 		OctreeCube *cube = &cubes[i];
 		int origin = cube_origins[i];
 		
@@ -221,8 +272,13 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 			}
 		}
 
-		mesh.vertices = (float *)malloc(3*sizeof(float)*72);    
-		Vector3 *mesh_vertex = (Vector3*)mesh.vertices;
+		// TODO: process more than 1 surface (arena push and surface computing in code above)
+		// TODO: explain or do better this random arena push
+		//mesh.vertices = (float *)malloc(3*sizeof(float)*72);    
+		int vertex_count = (surface_points_count[0] - 2) * 3;
+		if (surface_points_count[0] == 5 || surface_points_count[0] == 6)
+			vertex_count *= 2;
+		Vector3 *mesh_vertex = (Vector3*)PushArray(arena, vertex_count, Vector3);
 		for (int surface_index = 0; surface_index < 4; surface_index++)
 		{
 			int points = surface_points_count[surface_index];
@@ -265,8 +321,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 					DrawLine3D(draw_origin, draw_end, GREEN);
 				}
 
-				mesh.triangleCount += 1;
-				mesh.vertexCount += 3;
+				mesh->triangleCount += 1;
+				mesh->vertexCount += 3;
 
 				*mesh_vertex++ = surface[0];
 				*mesh_vertex++ = surface[1];
@@ -310,8 +366,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 					DrawLine3D(draw_origin, draw_end, GREEN);
 				}
 
-				mesh.triangleCount += 2;
-				mesh.vertexCount += 6;
+				mesh->triangleCount += 2;
+				mesh->vertexCount += 6;
 
 				*mesh_vertex++ = surface[0];
 				*mesh_vertex++ = surface[1];
@@ -330,8 +386,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 					DrawCubeWires(draw_origin, axis_step, axis_step, axis_step, GREEN);
 				}
 
-				mesh.triangleCount += 3;
-				mesh.vertexCount += 9;
+				mesh->triangleCount += 3;
+				mesh->vertexCount += 9;
 
 				*mesh_vertex++ = surface[0];
 				*mesh_vertex++ = surface[1];
@@ -346,8 +402,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 				*mesh_vertex++ = surface[4];
 
 				//shish
-				mesh.triangleCount += 3;
-				mesh.vertexCount += 9;
+				mesh->triangleCount += 3;
+				mesh->vertexCount += 9;
 
 				*mesh_vertex++ = surface[0];
 				*mesh_vertex++ = surface[1];
@@ -370,8 +426,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 					DrawCubeWires(draw_origin, axis_step, axis_step, axis_step, GREEN);
 				}
 
-				mesh.triangleCount += 4;
-				mesh.vertexCount += 12;
+				mesh->triangleCount += 4;
+				mesh->vertexCount += 12;
 
 				*mesh_vertex++ = surface[0];
 				*mesh_vertex++ = surface[1];
@@ -389,8 +445,8 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 				*mesh_vertex++ = surface[3];
 				*mesh_vertex++ = surface[5];
 
-				mesh.triangleCount += 4;
-				mesh.vertexCount += 12;
+				mesh->triangleCount += 4;
+				mesh->vertexCount += 12;
 
 				*mesh_vertex++ = surface[4];
 				*mesh_vertex++ = surface[5];
@@ -413,7 +469,7 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 				continue;
 			}
 		}
-		UploadMesh(&mesh, false);
+		//UploadMesh(&mesh, false);
 
 		/* //test light shit
 		mesh.normals = (float *)malloc(3*sizeof(float)*72);    
@@ -425,19 +481,25 @@ void DrawMetaSphereWithOctree(MetaSphere *metaspheres, int index, float axis_ste
 		}
 		*/
 
+		/*
 		Model model = LoadModelFromMesh(mesh);
 		//model.materials[0].shader = shader;
 		DrawModel(model, {0,0,0}, 1, CLITERAL(Color){ 240, 140, 0, 255 });	
 		if (global_draw_polygon_wires)
 			DrawModelWires(model, {0,0,0}, 1, BLACK);
 		UnloadModel(model);
+		*/
 	}
 
 	free(octree_vertices);
 }
 
-void GenerateMeshFromMetaSphere(MetaSphere *metaspheres, int index, float axis_step, Vector3 start_point)
+void DrawMetaSphere(MetaSphere *metaspheres, int index, float axis_step, Vector3 start_point)
 {
+	memory_arena mesh_arena;
+	InitializeArena(&mesh_arena, Megabytes(1), (uint8_t *)global_program_memory.TransientStorage);
+	Mesh mesh = {0};
+	mesh.vertices = (float *)mesh_arena.Base;
 	MetaSphere metasphere = metaspheres[index];
 
 	Vector3 radius_unit_vector = Vector3Scale(Vector3One(), metasphere.radius);
@@ -455,13 +517,36 @@ void GenerateMeshFromMetaSphere(MetaSphere *metaspheres, int index, float axis_s
 			octree_point.x = start_point.x;
 			for (int xn = 0; xn < steps_count; xn++)
 			{
-				DrawMetaSphereWithOctree(metaspheres, index, axis_step/2, octree_point);
+				MetaSphereMeshWithOctree(metaspheres, &mesh, &mesh_arena, index, axis_step/2, octree_point);
 				octree_point.x += axis_step;
 			}
 			octree_point.y += axis_step;
 		}
 		octree_point.z += axis_step;
 	}
+
+	UploadMesh(&mesh, false);
+	
+	Model model = LoadModelFromMesh(mesh);
+	DrawModel(model, {0,0,0}, 1, CLITERAL(Color){ 240, 140, 0, 255 });	
+	if (global_draw_polygon_wires)
+		DrawModelWires(model, {0,0,0}, 1, BLACK);
+
+#ifndef MAX_MESH_VERTEX_BUFFERS
+#if SUPPORT_GPU_SKINNING
+    // NOTE: Two additional vertex buffers required to store bone indices and bone weights
+    // WARNING: Some GPUs could not support more than 8 VBOs
+    #define MAX_MESH_VERTEX_BUFFERS  9      // Maximum vertex buffers (VBO) per mesh
+#else
+    #define MAX_MESH_VERTEX_BUFFERS  7      // Maximum vertex buffers (VBO) per mesh
+#endif
+#endif
+	// NOTE: Memory is saved, but performance hits -10 FPS
+	if (mesh.vboId != NULL) 
+		for (int i = 0; i < MAX_MESH_VERTEX_BUFFERS; i++) 
+			rlUnloadVertexBuffer(mesh.vboId[i]);
+    RL_FREE(mesh.vboId);
+	rlUnloadVertexArray(mesh.vaoId);
 }
 
 void GenerateSphere(Vector3 centerPos, float radius, int rings, int slices, Color color)
@@ -478,13 +563,48 @@ void GenerateSphere(Vector3 centerPos, float radius, int rings, int slices, Colo
 
 int main()
 {
+	//
+	// Memorandum ======================================
+	//
+	global_program_memory.PermanentStorageSize = Megabytes(64);
+	global_program_memory.TransientStorageSize = Gigabytes(1);
+
+	// TODO(casey): Handle various memory footprints (USING SYSTEM METRICS)
+	// TODO(casey): Transient storage needs to be broken up
+	// into game transient andt cache transient, and only the
+	// former needs to be saved for state playback
+	/*
+#if HANDMADE_INTERNALO
+	LPVOID BaseAddress = (LPVOID)Terabytes(2);
+#else
+	LPVOID BaseAddress = 0;
+#endif
+	*/
+	// TODO(casey): USE MEM_LARGE_PAGES and call adjust token priveleges
+	// when not on Windows XP?
+	// NOTE(grigory): TLB pressure should released with large paging. 
+	// TODO(grigory): Learn more about TLB in virtual memory unit
+	/*
+	global_program_memory.PermanentStorage = (void *)VirtualAlloc(
+		BaseAddress,
+		(size_t)global_program_memory.PermanentStorageSize + global_program_memory.TransientStorageSize,
+		MEM_RESERVE|MEM_COMMIT,//|MEM_LARGE_PAGES, 
+		PAGE_READWRITE);
+	*/
+	global_program_memory.PermanentStorage = (void *)MemAlloc(
+		(uint32_t)global_program_memory.PermanentStorageSize + (uint32_t)global_program_memory.TransientStorageSize);
+
+	global_program_memory.TransientStorage = (uint8_t *)global_program_memory.PermanentStorage + global_program_memory.PermanentStorageSize;
+	//
+	// ==================================================
+	//
 	int screenWidth = 800;
 	int screenHeight = 600;
 	Vector2 fullscreenRes = {(float)GetScreenWidth(), (float)GetScreenHeight()};
 	Vector2 screenRes = {(float)screenWidth, (float)screenHeight};
 
     SetConfigFlags(FLAG_MSAA_4X_HINT);  // Enable Multi Sampling Anti Aliasing 4x (if available)
-	InitWindow(screenWidth, screenHeight, "meatballs");
+	InitWindow(screenWidth, screenHeight, "metaballs");
 	SetWindowState(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
 
 	rlDisableBackfaceCulling();
@@ -500,12 +620,10 @@ int main()
 	camera2d.zoom = 2.0f; // Scales everything by 200%
 
     //DisableCursor();                    // Limit cursor to relative movement inside the window
-    SetTargetFPS(60);                   // Set our game to run at 60 frames-per-second
+    SetTargetFPS(60);
 
-//RLAPI Model LoadModelFromMesh(Mesh mesh);                                                   // Load model from generated mesh (default material)
-	Model sphere_model = LoadModel("sphere.obj");                                                // Load model from files (meshes and materials)
-	if (!IsModelValid(sphere_model))
-		*((int *)0) = 0;
+	//Model sphere_model = LoadModel("sphere.obj");
+	//Assert(IsModelValid(sphere_model));
 
     while (!WindowShouldClose())
     {
@@ -598,8 +716,8 @@ int main()
 				if (IsKeyPressed(KEY_EQUAL))
 					grid_step += 0.1;
 				
-				GenerateMeshFromMetaSphere(metaspheres, 0, grid_step, Vector3Add({-1,-1,-1}, metaspheres[0].center));
-				GenerateMeshFromMetaSphere(metaspheres, 1, grid_step, Vector3Add({-1,-1,-1}, metaspheres[1].center));
+				DrawMetaSphere(metaspheres, 0, grid_step, Vector3Add({-1,-1,-1}, metaspheres[0].center));
+				DrawMetaSphere(metaspheres, 1, grid_step, Vector3Add({-1,-1,-1}, metaspheres[1].center));
 
 				//if (global_draw_backing_sphere)
 				//	DrawSphere({0, 0, 0}, 0.9, RED);
@@ -616,6 +734,7 @@ int main()
 			//------------------------------------------------------------------------------
 			int width = GetScreenWidth();
 			int height = GetScreenHeight();
+			DrawFPS(width - 80, 0);                                                     // Draw current FPS
 
 			DrawRectangle(0, 0, 370, 275, { 232, 232, 232, 255 });
 

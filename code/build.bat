@@ -1,6 +1,6 @@
 @echo off
 
-set CommonCompilerFlags=-MTd -nologo -fp:fast -Gm- -GR- -EHa- -Oi -O2 -WX -W4 -wd4201 -wd4100 -wd4189 -wd4505 -wd4127 -FC -Z7
+set CommonCompilerFlags=-MTd -nologo -fp:fast -Gm- -GR- -EHa- -Oi -Od -WX -W4 -wd4201 -wd4100 -wd4189 -wd4505 -wd4127 -FC -Z7
 set CommonLinkerFlags= -incremental:no -opt:ref raylib.lib Msvcrt.lib Gdi32.lib Winmm.lib User32.lib Shell32.lib
 
 :: TODO - can we just build both with one exe?
