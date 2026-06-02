@@ -141,6 +141,19 @@ struct OctreeCube
 	OctreeVertex *vertices[8];
 };
 
+struct OctreeIntersections
+{
+	uint8_t edges[12];
+};
+
+static OctreeIntersections intersection_edges_from_hot_vertices[256];
+
+struct OctreeEdge
+{
+	uint8_t v1;
+	uint8_t v2;
+};
+
 #define OCTREE_RESOLUTION 1
 #define OCTREE_CUBES 8
 #define OCTREE_AXIS_POINTS 3
@@ -181,8 +194,9 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 		int origin = cube_origins[i];
 		
 		int hot_count = 0;
+
 		//
-		// TODO: use this bitfield to bake poligons to table
+		// TODO: use this bitfield to bake polygons to table
 		//
 		uint8_t hot_vertices = 0;
 		for (int j = 0; j < 8; j++)
@@ -200,10 +214,43 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 			continue;
 		}
 		
-		//Vector3 draw_origin = Vector3Add(cube->vertices[0]->point, Vector3Scale(Vector3One(), axis_step/2));
-		//DrawCubeWires(draw_origin, axis_step, axis_step, axis_step, MAROON);
+#if 1
+		static OctreeEdge edge_vertices[12] = {
+			{0, 1}, {1, 3}, {3, 2}, {2, 0},
+			{0, 4}, {1, 5}, {3, 7}, {2, 6},
+			{4, 5}, {5, 7}, {7, 6}, {6, 4}
+		};
+		OctreeIntersections intersections = intersection_edges_from_hot_vertices[hot_vertices];
+		Vector3 estimated_vertices[12] = {0};
+		int vertex_count = 0;
+
+		for (int int_index = 0; int_index < 12; ++int_index)
+		{
+			// TODO: Document or rewrite clearer
+			uint8_t edge_index = intersections.edges[int_index];
+			if (edge_index == 0xFF)
+				break;
+			vertex_count++;
+
+			if (vertex_count > 10)
+			{
+				vertex_count += 0;
+			}
+
+			OctreeVertex *v1 = cube->vertices[edge_vertices[edge_index].v1];
+			OctreeVertex *v2 = cube->vertices[edge_vertices[edge_index].v2];
+			//t = (THRESHOLD - Force at B) / (Force at A - Force at B)
+			//P = B*(1-t) + A*t;
+			float t = (THRESHOLD - v2->force) / (v1->force - v2->force);
+			estimated_vertices[int_index] = Vector3Add(Vector3Scale(v2->point, 1-t), Vector3Scale(v1->point, t));
+		}
+
+#else
+#endif
 
 		// NOTE: should go away when prev todo completed
+		/* ==========================================================
+
 		int vertex_surface[8] = {0};
 		int current_surface = 1;
 		// 4 sufaces 16 points each
@@ -262,23 +309,68 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 						}
 						int surface_index = vertex_surface[j] - 1;
 						surface_points[surface_points_count[surface_index]] = estimated_point;
-						if (Vector3Equals(estimated_point , {-0.25, -0.75, -0.75}) && surface_points_count[surface_index] == 3)
-						{
-							malloc(0);
-						}
 						surface_points_count[surface_index]++;
 					}
 				}
 			}
 		}
 
-		// TODO: process more than 1 surface (arena push and surface computing in code above)
-		// TODO: explain or do better this random arena push
-		//mesh.vertices = (float *)malloc(3*sizeof(float)*72);    
 		int vertex_count = (surface_points_count[0] - 2) * 3;
 		if (surface_points_count[0] == 5 || surface_points_count[0] == 6)
 			vertex_count *= 2;
-		Vector3 *mesh_vertex = (Vector3*)PushArray(arena, vertex_count, Vector3);
+
+		================================ */
+
+		if ((global_draw_surfaces_points_count - 2) * 3 == vertex_count || global_draw_surfaces_points_count == 0)
+		{
+			// TODO: process more than 1 surface (arena push and surface computing in code above)
+			// TODO: explain or do better this random arena push
+			Vector3 *mesh_vertex = (Vector3*)PushArray(arena, vertex_count, Vector3);
+		
+			mesh->triangleCount += vertex_count / 3;
+			mesh->vertexCount += vertex_count;
+			for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index)
+			{
+				*mesh_vertex++ = estimated_vertices[vertex_index];
+			}
+
+			if (global_draw_octree_wires)
+			{
+				Vector3 draw_origin = Vector3Add(cube->vertices[0]->point, Vector3Scale(Vector3One(), axis_step/2));
+				DrawCubeWires(draw_origin, axis_step, axis_step, axis_step, GREEN);
+			}
+			if (global_draw_octree_grid)
+			{
+				Vector3 draw_origin = Vector3Add(cube->vertices[0]->point, Vector3Scale(Vector3One(), axis_step/2));
+				draw_origin.y = 0;
+				DrawCubeWires(draw_origin, axis_step, 0, axis_step, GREEN);
+
+				draw_origin = cube->vertices[0]->point;
+				draw_origin.y = 0;
+				draw_origin.x -= axis_step/2;
+				Vector3 draw_end = draw_origin;
+				draw_end.x += axis_step*2;
+				DrawLine3D(draw_origin, draw_end, GREEN);
+
+				draw_origin.z += axis_step;
+				draw_end.z += axis_step;
+				DrawLine3D(draw_origin, draw_end, GREEN);
+
+
+				draw_origin = cube->vertices[0]->point;
+				draw_origin.y = 0;
+				draw_origin.z -= axis_step/2;
+				draw_end = draw_origin;
+				draw_end.z += axis_step*2;
+				DrawLine3D(draw_origin, draw_end, GREEN);
+
+				draw_origin.x += axis_step;
+				draw_end.x += axis_step;
+				DrawLine3D(draw_origin, draw_end, GREEN);
+			}
+		}
+
+		/*
 		for (int surface_index = 0; surface_index < 4; surface_index++)
 		{
 			int points = surface_points_count[surface_index];
@@ -469,25 +561,6 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 				continue;
 			}
 		}
-		//UploadMesh(&mesh, false);
-
-		/* //test light shit
-		mesh.normals = (float *)malloc(3*sizeof(float)*72);    
-		Vector3 *mesh_normal = (Vector3*)mesh.normals;
-		mesh_vertex = (Vector3*)mesh.vertices;
-		for (int k = 0; k < mesh.vertexCount; ++k)
-		{
-			*mesh_normal++ = Vector3Normalize(Vector3Subtract(mesh_vertex[k], metasphere.center));
-		}
-		*/
-
-		/*
-		Model model = LoadModelFromMesh(mesh);
-		//model.materials[0].shader = shader;
-		DrawModel(model, {0,0,0}, 1, CLITERAL(Color){ 240, 140, 0, 255 });	
-		if (global_draw_polygon_wires)
-			DrawModelWires(model, {0,0,0}, 1, BLACK);
-		UnloadModel(model);
 		*/
 	}
 
@@ -561,8 +634,175 @@ void GenerateSphere(Vector3 centerPos, float radius, int rings, int slices, Colo
 	UnloadModel(sphere_model);
 }
 
+static uint8_t vertex_rot_y[8] = {1, 3, 0, 2, 5, 7, 4, 6};
+static uint8_t edge_rot_y[12] = {1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8};
+
+void temp_rotate_octree_y(uint8_t *vertices, OctreeIntersections *edges)
+{
+	uint8_t result = 0;
+	for (int i = 0; i < 8; ++i)
+	{
+		if (*vertices & (1 << i))
+			result |= 1 << vertex_rot_y[i];
+	}
+	*vertices = result;
+
+	for (int i = 0; i < 12; ++i)
+	{
+		uint8_t *edge = edges->edges + i; 
+		if (*edge == 0xFF)
+			break;
+
+		*edge = edge_rot_y[*edge];
+	}
+}
+
+static uint8_t vertex_rot_x[8] = {4, 5, 0, 1, 6, 7, 2, 3};
+static uint8_t edge_rot_x[12] = {8, 5, 0, 4, 11, 9, 1, 3, 10, 6, 2, 7};
+
+void temp_rotate_octree_x(uint8_t *vertices, OctreeIntersections *edges)
+{
+	uint8_t result = 0;
+	for (int i = 0; i < 8; ++i)
+	{
+		if (*vertices & (1 << i))
+			result |= 1 << vertex_rot_x[i];
+	}
+	*vertices = result;
+
+	for (int i = 0; i < 12; ++i)
+	{
+		uint8_t *edge = edges->edges + i; 
+		if (*edge == 0xFF)
+			break;
+
+		*edge = edge_rot_x[*edge];
+	}
+}
+
+static uint8_t vertex_rot_z[8] = {4, 0, 6, 2, 5, 1, 7, 3};
+static uint8_t edge_rot_z[12] = {4, 3, 7, 11, 8, 0, 2, 10, 5, 1, 6, 9};
+
+void temp_rotate_octree_z(uint8_t *vertices, OctreeIntersections *edges)
+{
+	uint8_t result = 0;
+	for (int i = 0; i < 8; ++i)
+	{
+		if (*vertices & (1 << i))
+			result |= 1 << vertex_rot_z[i];
+	}
+	*vertices = result;
+
+	for (int i = 0; i < 12; ++i)
+	{
+		uint8_t *edge = edges->edges + i; 
+		if (*edge == 0xFF)
+			break;
+
+		*edge = edge_rot_z[*edge];
+	}
+}
+
+uint8_t unique_surfaces[14] = {0b00000001,
+                               0b00000011,
+                               0b00100001,
+                               0b10000001,
+                               0b00001110,
+                               0b10000011,
+                               0b10010010,
+                               0b00001111,
+                               0b01001101,
+                               0b10011001,
+                               0b10001101,
+                               0b00011110,
+                               0b01101001,
+                               0b01001110};
+
+
+void temp_fill_edge_table()
+{
+	// NOTE: edges should be numerated such that partial increment with modulo 4 gives rotated cube.
+	// So numbers increment in range 1..4, 5..8, 9..12 (or i guess 0..3 etc)
+	for (int i = 0; i < 256; ++i)
+	{
+		intersection_edges_from_hot_vertices[i] = {{0xFF}};
+	}
+	intersection_edges_from_hot_vertices[0b00000001] = {{0, 3, 4,	0xFF}};
+
+	intersection_edges_from_hot_vertices[0b00000011] = {{1, 3, 4,	1, 4, 5,	0xFF}};
+	intersection_edges_from_hot_vertices[0b00100001] = {{0, 3, 4,  	5, 8, 9,	0xFF}};
+	intersection_edges_from_hot_vertices[0b10000001] = {{0, 3, 4,  	6, 9, 10,	0xFF}};
+
+	intersection_edges_from_hot_vertices[0b00001110] = {{0, 5, 3,	3, 5, 7,	5, 6, 7,	0xFF}};
+	intersection_edges_from_hot_vertices[0b10000011] = {{1, 3, 4,	1, 4, 5,	6, 9, 10,	0xFF}};
+	intersection_edges_from_hot_vertices[0b10010010] = {{0, 5, 1,	4, 11, 8,	6, 9, 10,	0xFF}};
+
+	intersection_edges_from_hot_vertices[0b00001111] = {{4, 5, 7,	5, 6, 7,	0xFF}};
+	intersection_edges_from_hot_vertices[0b01001101] = {{0, 10, 4,	0, 6, 10,	0, 1, 6,	4, 10, 11}};
+	intersection_edges_from_hot_vertices[0b10011001] = {{0, 3, 8,	3, 11, 8,	1, 9, 2,	2, 9, 10 }};
+	intersection_edges_from_hot_vertices[0b10001101] = {{0, 1, 9,	0, 9, 4,	7, 9, 10,	4, 9, 7  }};
+	intersection_edges_from_hot_vertices[0b00011110] = {{0, 5, 3,	3, 5, 7,	5, 6, 7,	4, 11, 8 }};
+	intersection_edges_from_hot_vertices[0b01101001] = {{0, 3, 4,	1, 6, 2,	7, 10, 11,	5, 8, 9  }};
+	intersection_edges_from_hot_vertices[0b01001110] = {{0, 11, 3,	0, 5, 11,	5, 6, 11,	6, 10, 11}};
+
+	for (int i = 0; i < 14; i++)
+	{
+		uint8_t reference_vertices = unique_surfaces[i];	
+		OctreeIntersections reference_edges = intersection_edges_from_hot_vertices[reference_vertices];
+
+		uint8_t vertices = reference_vertices;	
+		OctreeIntersections edges = reference_edges;
+
+		uint8_t negated_vertices = ~vertices;
+		OctreeIntersections negated_edges = {0};
+		int edge_count = 0;
+		for (int neg = 0; neg < 12; neg++)
+		{
+			if (edges.edges[neg] == 0xFF)
+				break;
+			edge_count++;
+		}
+		if (edge_count < 12) negated_edges.edges[edge_count--] = 0xFF;
+		for (int neg = 0; neg < 12; neg++)
+		{
+			negated_edges.edges[edge_count--] = edges.edges[neg];
+			if (edge_count < 0)
+				break;
+		}
+
+		for (int x = 0; x < 4; x++)
+		{
+			for (int y = 0; y < 4; y++)
+			{
+				for (int z = 0; z < 4; z++)
+				{
+					if (negated_vertices == 254)// error
+					{
+						vertices += 0;
+					}
+					if (i==8 && x== 0 && y== 1 && z== 0)
+					{
+						vertices += 0;
+					}
+					
+					intersection_edges_from_hot_vertices[vertices] = edges;
+					temp_rotate_octree_z(&vertices, &edges);
+					if (intersection_edges_from_hot_vertices[negated_vertices].edges[0] == 0xFF)
+						intersection_edges_from_hot_vertices[negated_vertices] = negated_edges;
+					temp_rotate_octree_z(&negated_vertices, &negated_edges);
+				}
+				temp_rotate_octree_y(&vertices, &edges);
+				temp_rotate_octree_y(&negated_vertices, &negated_edges);
+			}
+			temp_rotate_octree_x(&vertices, &edges);
+			temp_rotate_octree_x(&negated_vertices, &negated_edges);
+		}
+	}
+}
+
 int main()
 {
+	temp_fill_edge_table();
 	//
 	// Memorandum ======================================
 	//
@@ -607,7 +847,7 @@ int main()
 	InitWindow(screenWidth, screenHeight, "metaballs");
 	SetWindowState(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
 
-	rlDisableBackfaceCulling();
+	//rlDisableBackfaceCulling();
 
 	Camera3D camera = {0};
     camera.position = {0.0f, 10.0f, 10.0f};  // Camera position
@@ -657,6 +897,7 @@ int main()
 			!CheckCollisionRecs({0, 0, 340, 200}, {GetMousePosition().x, GetMousePosition().y, 0, 0}))
 		{
 			UpdateCamera(&camera, CAMERA_THIRD_PERSON);
+			//UpdateCamera(&camera, CAMERA_FREE);
 		}
 
 
@@ -682,6 +923,7 @@ int main()
 				{
 					DrawRay({{0,0,0},{1,0,0}}, RED);                                                                // Draw a ray line
 					DrawRay({{0,0,0},{0,1,0}}, GREEN);                                                                // Draw a ray line
+					DrawRay({{0,0,0},{0,0,1}}, BLUE);                                                                // Draw a ray line
 				}
 
 				static float speed = 0.02;
@@ -739,8 +981,8 @@ int main()
 			DrawRectangle(0, 0, 370, 275, { 232, 232, 232, 255 });
 
 			float margin_x = 110;
-			GuiSliderBar({ margin_x, 30, 120, 20}, "Grid size", TextFormat("%.0f", grid_step), &grid_step, .2f, 2);
-			GuiSliderBar({ margin_x, 60, 120, 20 }, "Threshold", TextFormat("%.0f", THRESHOLD), &THRESHOLD, .0f, 1);
+			GuiSliderBar({ margin_x, 30, 120, 20}, "Grid size", TextFormat("%.2f", grid_step), &grid_step, .2f, 2);
+			GuiSliderBar({ margin_x, 60, 120, 20 }, "Threshold", TextFormat("%.2f", THRESHOLD), &THRESHOLD, .0f, 1);
 			GuiCheckBox({ margin_x, 90, 20, 20 }, "Show volume grid", &global_draw_octree_wires);
 			GuiCheckBox({ margin_x, 120, 20, 20 }, "Show projected grid", &global_draw_octree_grid);
 			GuiCheckBox({ margin_x, 150, 20, 20 }, "Show polygons", &global_draw_polygon_wires);
