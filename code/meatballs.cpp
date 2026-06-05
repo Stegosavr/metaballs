@@ -8,6 +8,7 @@
 #include "stdlib.h"
 #include "stdint.h"
 #include "math.h"
+#include "stdio.h"
 
 #define internal static
 
@@ -69,6 +70,8 @@ bool global_draw_octree_wires = true;
 bool global_draw_octree_grid = true;
 bool global_draw_polygon_wires = true;
 bool global_draw_backing_sphere = true;
+
+static Camera3D camera;
 
 struct Size
 {
@@ -141,12 +144,14 @@ struct OctreeCube
 	OctreeVertex *vertices[8];
 };
 
-struct OctreeIntersections
-{
-	uint8_t edges[12];
-};
+//struct OctreeIntersections
+//{
+//	uint8_t edges[12];
+//};
 
-static OctreeIntersections intersection_edges_from_hot_vertices[256];
+#include "intersection_edges_table.h"
+
+//static OctreeIntersections iintersection_edges_from_hot_vertices[256];
 
 struct OctreeEdge
 {
@@ -220,14 +225,14 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 			{0, 4}, {1, 5}, {3, 7}, {2, 6},
 			{4, 5}, {5, 7}, {7, 6}, {6, 4}
 		};
-		OctreeIntersections intersections = intersection_edges_from_hot_vertices[hot_vertices];
+		uint8_t *intersections = intersection_edges_from_hot_vertices[hot_vertices];
 		Vector3 estimated_vertices[12] = {0};
 		int vertex_count = 0;
 
 		for (int int_index = 0; int_index < 12; ++int_index)
 		{
 			// TODO: Document or rewrite clearer
-			uint8_t edge_index = intersections.edges[int_index];
+			uint8_t edge_index = intersections[int_index];
 			if (edge_index == 0xFF)
 				break;
 			vertex_count++;
@@ -343,7 +348,20 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, Mesh *mesh, memory_arena 
 			{
 				Vector3 draw_origin = Vector3Add(cube->vertices[0]->point, Vector3Scale(Vector3One(), axis_step/2));
 				draw_origin.y = 0;
+				if (CheckCollisionBoxes({cube->vertices[0]->point, cube->vertices[7]->point}, {camera.position, camera.position}))
+				{
+					for (int draw_vertex = 0; draw_vertex < 8; draw_vertex++)
+					{
+						DrawSphere(cube->vertices[draw_vertex]->point, 0.02, CLITERAL(Color){ 255, 255, 255, 155 });
+
+						for (int vertex_index = 0; vertex_index+2 < vertex_count; vertex_index+=3)
+						{
+							DrawTriangle3D(estimated_vertices[vertex_index], estimated_vertices[vertex_index+1],estimated_vertices[vertex_index+2], WHITE);
+						}
+					}
+				}
 				DrawCubeWires(draw_origin, axis_step, 0, axis_step, GREEN);
+				//TraceLog(LOG_INFO, "x:%.2f y:%.2f", camera.position.x, camera.position.y);
 
 				draw_origin = cube->vertices[0]->point;
 				draw_origin.y = 0;
@@ -634,6 +652,7 @@ void GenerateSphere(Vector3 centerPos, float radius, int rings, int slices, Colo
 	UnloadModel(sphere_model);
 }
 
+/*
 static uint8_t vertex_rot_y[8] = {1, 3, 0, 2, 5, 7, 4, 6};
 static uint8_t edge_rot_y[12] = {1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8};
 
@@ -798,11 +817,39 @@ void temp_fill_edge_table()
 			temp_rotate_octree_x(&negated_vertices, &negated_edges);
 		}
 	}
+
+	FILE *file = fopen("table.h", "w");
+	fprintf(file,"{\n");
+	for (int i = 0; i < 256; i++)
+	{
+		fprintf(file,"{");
+		for (int j = 0; j < 4; j++)
+		{
+			int index = j * 3;
+			int value = intersection_edges_from_hot_vertices[i].edges[index];
+			if (value == 0xFF)
+			{
+				fprintf(file,"0xFF");
+				break;
+			}
+			fprintf(file,"%d, ",intersection_edges_from_hot_vertices[i].edges[index]);
+			fprintf(file,"%d, ",intersection_edges_from_hot_vertices[i].edges[index+1]);
+			if (index == 9)
+				fprintf(file,"%d",intersection_edges_from_hot_vertices[i].edges[index+2]);
+			else
+				fprintf(file,"%d,\t",intersection_edges_from_hot_vertices[i].edges[index+2]);
+		}
+		fprintf(file,"},\n");
+	}
+	fprintf(file,"};\n");
+	fclose(file);
 }
+*/
+
 
 int main()
 {
-	temp_fill_edge_table();
+	//temp_fill_edge_table();
 	//
 	// Memorandum ======================================
 	//
@@ -847,9 +894,8 @@ int main()
 	InitWindow(screenWidth, screenHeight, "metaballs");
 	SetWindowState(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
 
-	//rlDisableBackfaceCulling();
+	rlDisableBackfaceCulling();
 
-	Camera3D camera = {0};
     camera.position = {0.0f, 10.0f, 10.0f};  // Camera position
     camera.target = {0.0f, 0.0f, 0.0f};      // Camera looking at point
     camera.up = {0.0f, 1.0f, 0.0f};          // Camera up vector (rotation towards target)
@@ -896,8 +942,8 @@ int main()
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
 			!CheckCollisionRecs({0, 0, 340, 200}, {GetMousePosition().x, GetMousePosition().y, 0, 0}))
 		{
-			UpdateCamera(&camera, CAMERA_THIRD_PERSON);
-			//UpdateCamera(&camera, CAMERA_FREE);
+			//UpdateCamera(&camera, CAMERA_THIRD_PERSON);
+			UpdateCamera(&camera, CAMERA_FREE);
 		}
 
 
@@ -958,7 +1004,7 @@ int main()
 				if (IsKeyPressed(KEY_EQUAL))
 					grid_step += 0.1;
 				
-				DrawMetaSphere(metaspheres, 0, grid_step, Vector3Add({-1,-1,-1}, metaspheres[0].center));
+				//DrawMetaSphere(metaspheres, 0, grid_step, Vector3Add({-1,-1,-1}, metaspheres[0].center));
 				DrawMetaSphere(metaspheres, 1, grid_step, Vector3Add({-1,-1,-1}, metaspheres[1].center));
 
 				//if (global_draw_backing_sphere)
