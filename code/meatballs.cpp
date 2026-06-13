@@ -7,8 +7,6 @@
 #define RLIGHTS_IMPLEMENTATION
 #include "../include/rlights.h"
 
-#define INDEXED_VERTEX_BUFFER 1
-
 //#if defined(PLATFORM_DESKTOP)
     #define GLSL_VERSION            330
 //#else   // PLATFORM_ANDROID, PLATFORM_WEB
@@ -21,6 +19,9 @@
 #include "stdio.h"
 
 #include "intersection_edges_table.h"
+
+#define FACE_NORMAL_LIGHTING 1
+#define FLT_MAX     340282346638528859811704183484516925440.0f
 
 #define internal static
 
@@ -37,6 +38,22 @@
 #define Megabytes(Value) (Kilobytes(Value)*1024ULL)
 #define Gigabytes(Value) (Megabytes(Value)*1024ULL)
 #define Terabytes(Value) (Gigabytes(Value)*1024ULL)
+
+#define PROFILE_START(name) \
+    double start_##name = GetTime(); double end_##name = 0; double elapsed_##name = 0;
+
+#define PROFILE_END(name) \
+    end_##name = GetTime(); \
+    elapsed_##name = (double)(end_##name - start_##name); \
+    printf("[%s] Time: %.5f seconds\n", #name, elapsed_##name);
+
+#define PROFILE_PAUSE(name, timer) \
+    end_##name = GetTime(); \
+    elapsed_##name = (double)(end_##name - start_##name); \
+	timers[timer] += elapsed_##name;
+
+#define PROFILE_TIMER(name, timer) \
+    printf("[%s] Time: %.5f seconds\n", #name, timers[timer]);
 
 struct memory_arena
 {
@@ -91,7 +108,10 @@ bool global_flat_shading = false;
 
 static Camera3D camera;
 static Shader shader;
-bool global_is_shader_valid;
+static bool global_shader_valid;
+static uint64_t global_shader_vs_mod_time;
+static uint64_t global_shader_fs_mod_time;
+
 
 struct Size
 {
@@ -148,7 +168,7 @@ uint32_t hash6432shift(uint64_t key)
 }
 */
 
-#define BUCKET_COUNT 100
+#define BUCKET_COUNT 1000
 
 struct hash_map
 {
@@ -219,6 +239,13 @@ struct MetaSphere
 {
 	Vector3 center;
 	float radius;
+	int flags;
+	Color color;
+};
+
+enum MB_OJECT_FLAGS
+{
+	MB_OBJECT_SELECTED = 1,
 };
 
 static float THRESHOLD = 0.2f;
@@ -229,20 +256,10 @@ float MetaSphereForceInPoint(Vector3 point, MetaSphere *metaspheres, int count)
 	//float force = Square(metasphere.radius) - Vector3DistanceSqr(point, metasphere.center);
 	//float force = metasphere.radius - Vector3Distance(point, metasphere.center);
 	
-	//for (int i = 0; i < count; i++)
-	float force = metaspheres[0].radius - Vector3Distance(point, metaspheres[0].center);
-	float force2 = metaspheres[1].radius - Vector3Distance(point, metaspheres[1].center);
-
 	float result = 0;
-	if (force > force2)
+	for (int i = 0; i < count; i++)
 	{
-		result = force;
-		if (force2 > 0)
-			result += force2;
-	}
-	else
-	{
-		result = force2;
+		float force = metaspheres[i].radius - Vector3Distance(point, metaspheres[i].center);
 		if (force > 0)
 			result += force;
 	}
@@ -252,30 +269,18 @@ float MetaSphereForceInPoint(Vector3 point, MetaSphere *metaspheres, int count)
 
 Vector3 MetaSphereNormalInPoint(Vector3 point, MetaSphere *metaspheres, int count)
 {
-	// TODO: find out if normalize can be omitted
-	Vector3 point_to_sphere1 = Vector3Subtract(point, metaspheres[0].center);
-	Vector3 point_to_sphere2 = Vector3Subtract(point, metaspheres[1].center);
-	float length1 = Vector3Length(point_to_sphere1);
-	float length2 = Vector3Length(point_to_sphere2);
+	float threshold_fix = 0;
+	if (THRESHOLD < 0.15)
+	{
+		threshold_fix = 0.2f - THRESHOLD;
+	}
 
 	Vector3 result = {0};
-	if (length1 < length2)
+	for (int i = 0; i < count; i++)
 	{
-		result = point_to_sphere1;
-		if (length2 < 1)
-		{
-			result = Vector3Add(result, Vector3Scale(point_to_sphere2, Square(length1/length2)));
-			DrawLine3D(point, Vector3Add(result, point), RED);
-		}
-	}
-	else
-	{
-		result = point_to_sphere2;
-		if (length1 < 1)
-		{
-			result = Vector3Add(result, Vector3Scale(point_to_sphere1, Square(length2/length1)));
-			DrawLine3D(point, Vector3Add(result, point), RED);
-		}
+		Vector3 sphere_to_point = Vector3Subtract(point, metaspheres[i].center);
+		float length = (float)fmax(0, Square(metaspheres[i].radius + threshold_fix) - Vector3LengthSqr(sphere_to_point));
+		result = Vector3Add(result, Vector3Scale(sphere_to_point, length));
 	}
 	return result;
 }
@@ -298,6 +303,8 @@ struct OctreeEdge
 	uint8_t v2;
 };
 
+static double timers[16] = {0};
+
 #define OCTREE_RESOLUTION 1
 #define OCTREE_CUBES 8
 #define OCTREE_AXIS_POINTS 3
@@ -318,8 +325,10 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 			octree_point.x = start_point.x;
 			for (int xn = 0; xn < OCTREE_AXIS_POINTS; xn++)
 			{
+				PROFILE_START(compute_force);
 				float force = MetaSphereForceInPoint(octree_point, metaspheres, group_objects_count);
 				octree_vertices[((zn)*OCTREE_AXIS_POINTS + yn)*OCTREE_AXIS_POINTS+xn] = {octree_point, force, force > THRESHOLD};
+				PROFILE_PAUSE(compute_force, 0);
 
 				//if (force > 0)
 				//	refine = true;
@@ -331,6 +340,7 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 		octree_point.z += axis_step;
 	}
 
+PROFILE_START(collect_hot);
 	int cube_origins[8] = {0, 1, 3, 4, 9, 10, 12, 13};
 	int vertex_edge_offsets[6] = {1, 2, 4, -1, -2, -4};
 	for (int i = 0; i < 8; i++)
@@ -364,7 +374,9 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 		uint8_t *intersections = intersection_edges_from_hot_vertices[hot_vertices];
 		Vector3 estimated_vertices[12] = {0};
 		int vertex_count = 0;
+	PROFILE_PAUSE(collect_hot,1);
 
+	PROFILE_START(compute_vertex);
 		for (int int_index = 0; int_index < 12; ++int_index)
 		{
 			// TODO: Document or rewrite clearer
@@ -375,16 +387,21 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 
 			OctreeVertex *v1 = cube->vertices[edge_vertices[edge_index].v1];
 			OctreeVertex *v2 = cube->vertices[edge_vertices[edge_index].v2];
+
 			//t = (THRESHOLD - Force at B) / (Force at A - Force at B)
 			//P = B*(1-t) + A*t;
 			float t = (THRESHOLD - v2->force) / (v1->force - v2->force);
 			estimated_vertices[int_index] = Vector3Add(Vector3Scale(v2->point, 1-t), Vector3Scale(v1->point, t));
 		}
+	PROFILE_PAUSE(compute_vertex,2);
 
+	PROFILE_START(fill_buffers);
 		if ((global_draw_surfaces_points_count - 2) * 3 == vertex_count || global_draw_surfaces_points_count == 0)
 		{
+#if FACE_NORMAL_LIGHTING
+			bool face_normal_lighting = group_objects_count > 10;
+#endif
 			mesh->triangleCount += vertex_count / 3;
-#if INDEXED_VERTEX_BUFFER
 			for (int face_index = 0; face_index < vertex_count / 3; ++face_index)
 			{
 				Vector3 face_normal = Vector3Normalize(Vector3CrossProduct(
@@ -399,58 +416,27 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 						Vector3 *vertex_normal = (Vector3*)PushArray(normals_arena, 1, Vector3);
 
 						*mesh_vertex = estimated_vertices[vertex_index];
-						*vertex_normal = face_normal;
+						// TODO: compute isosurface normal for more than 2 surfaces correctly, vertex faces for now
+#if FACE_NORMAL_LIGHTING
+						if (face_normal_lighting)
+							*vertex_normal = face_normal;
+						else
+#endif
+							*vertex_normal = MetaSphereNormalInPoint(estimated_vertices[vertex_index], metaspheres, group_objects_count);
 						mesh->vertexCount++;
 						node = hash_map_add(vertex_map, map_arena, estimated_vertices[vertex_index], {mesh_vertex, vertex_normal});
 					}
 					else
 					{
-						*(node->value.normal) = Vector3Add(*(node->value.normal), face_normal);
+#if FACE_NORMAL_LIGHTING
+						if (face_normal_lighting)
+							*(node->value.normal) = Vector3Add(*(node->value.normal), face_normal);
+#endif
 					}
 					uint16_t *vertex_index_buf = (uint16_t *)PushStruct(indices_arena, uint16_t);
 					*vertex_index_buf = (uint16_t)(node->value.vertex - (Vector3 *)mesh_arena->Base);
 				}
 			}
-#else
-			// TODO: explain or do better this random arena push
-			Vector3 *mesh_vertex = (Vector3*)PushArray(mesh_arena, vertex_count, Vector3);
-			Vector3 *vertex_normal = (Vector3*)PushArray(normals_arena, vertex_count, Vector3);
-		
-			mesh->vertexCount += vertex_count;
-			for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index)
-			{
-				*mesh_vertex++ = estimated_vertices[vertex_index];
-				// TODO: might be performance hit. Investigate some approximation possible. Based on three vertices
-				//if (!global_flat_shading)
-				//{
-					//*vertex_normal++ = Vector3Normalize(Vector3Subtract(estimated_vertices[vertex_index], metasphere.center));
-					// TODO: redundant calculating for same vertex
-					//*vertex_normal++ = MetaSphereNormalInPoint(estimated_vertices[vertex_index], metaspheres, group_objects_count);
-				//}
-			}
-			for (int face_index = 0; face_index < vertex_count / 3; ++face_index)
-			{
-				int vertex_index = face_index * 3;
-				Vector3 face_normal = Vector3CrossProduct(
-					Vector3Subtract(estimated_vertices[vertex_index+2], estimated_vertices[vertex_index+1]),
-					Vector3Subtract(estimated_vertices[vertex_index+0], estimated_vertices[vertex_index+1]));
-				if (!global_flat_shading)
-				{
-					*vertex_normal = *vertex_normal;
-				}
-			}
-			// NOTE: computed one face normal for all faces (up to 4)
-			if (global_flat_shading)
-			{
-				Vector3 face_normal = Vector3CrossProduct(
-					Vector3Subtract(estimated_vertices[2], estimated_vertices[1]),
-					Vector3Subtract(estimated_vertices[0], estimated_vertices[1]));
-				for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index)
-				{
-					*vertex_normal++ = face_normal;
-				}
-			}
-#endif
 
 			if (global_draw_octree_wires)
 			{
@@ -500,6 +486,7 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 				DrawLine3D(draw_origin, draw_end, GREEN);
 			}
 		}
+	PROFILE_PAUSE(fill_buffers,3);
 	}
 }
 
@@ -507,6 +494,7 @@ void MetaSphereMeshWithOctree(MetaSphere *metaspheres, int group_objects_count, 
 
 void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 {
+	MemoryZeroArray(timers);
 	// TODO: grouping by bounding box?
 	
 	// NOTE: group metaspheres by distance
@@ -533,9 +521,9 @@ void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 		}
 		else
 		{
-			BoundingBox *bounds = group_bounds + metasphere_group;
-			bounds->min = Vector3Min(bounds->min, Vector3Subtract(metasphere.center, radius_unit_vector));
-			bounds->max = Vector3Max(bounds->max, Vector3Add(metasphere.center, radius_unit_vector));
+			//BoundingBox *bounds = group_bounds + metasphere_group;
+			//bounds->min = Vector3Min(bounds->min, Vector3Subtract(metasphere.center, radius_unit_vector));
+			//bounds->max = Vector3Max(bounds->max, Vector3Add(metasphere.center, radius_unit_vector));
 		}
 
 		for (int other_metasphere_index = metasphere_index + 1; other_metasphere_index < count; other_metasphere_index++)
@@ -543,9 +531,20 @@ void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 			MetaSphere other_metasphere = metaspheres[other_metasphere_index];
 			if (Vector3Distance(metasphere.center, other_metasphere.center) <= (metasphere.radius + other_metasphere.radius))
 			{
-				object_group[other_metasphere_index] = metasphere_group;
+				if (object_group[other_metasphere_index] == ArrayCount(object_group))
+				{
+					object_group[other_metasphere_index] = metasphere_group;
+				}
+				else
+				{
+					metasphere_group = object_group[other_metasphere_index];
+					object_group[metasphere_index] = metasphere_group;
+				}
 			}
 		}
+		BoundingBox *bounds = group_bounds + metasphere_group;
+		bounds->min = Vector3Min(bounds->min, Vector3Subtract(metasphere.center, radius_unit_vector));
+		bounds->max = Vector3Max(bounds->max, Vector3Add(metasphere.center, radius_unit_vector));
 	}
 
 	// NOTE: draw groups
@@ -575,9 +574,7 @@ void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 		Mesh mesh = {0};
 		mesh.vertices = (float *)mesh_arena.Base;
 		mesh.normals =  (float *)normals_arena.Base;
-#if INDEXED_VERTEX_BUFFER
 		mesh.indices =  (uint16_t *)indices_arena.Base;
-#endif
 		//MetaSphere metasphere = metaspheres[index];
 
 		//Vector3 radius_unit_vector = Vector3Scale(Vector3One(), metasphere.radius);
@@ -621,11 +618,49 @@ void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 			}
 		}
 
+		if (IsKeyPressed(KEY_ENTER))
+		{
+			mesh.texcoords = (float*)map_arena.Base + Megabytes(1);
+			MemoryZero(mesh.texcoords, Megabytes(1));
+			bool result = ExportMesh(mesh, "mesh.obj");
+		}
+
+		PROFILE_START(upload_mesh);
 		UploadMesh(&mesh, false);
-		
+		PROFILE_END(upload_mesh);
+
 		Model model = LoadModelFromMesh(mesh);
-		model.materials[0].shader = shader;
-		DrawModel(model, {0,0,0}, 1, CLITERAL(Color){ 240, 140, 0, 255 });	
+		if (global_shader_valid)
+			model.materials[0].shader = shader;
+
+
+		static Color mb_colors[] = {
+			LIGHTGRAY,
+			GRAY,      
+			DARKGRAY,  
+			YELLOW,    
+			GOLD,      
+			ORANGE,    
+			PINK,      
+			RED,       
+			MAROON,    
+			GREEN,     
+			LIME,      
+			DARKGREEN, 
+			SKYBLUE,   
+			BLUE,      
+			DARKBLUE,  
+			PURPLE,    
+			VIOLET,    
+			DARKPURPLE,
+			BEIGE,     
+			BROWN,     
+			DARKBROWN, 
+		};
+		static int rnd_index = GetRandomValue(0, ArrayCount(mb_colors));
+
+		//DrawModel(model, {0,0,0}, 1, CLITERAL(Color){ 240, 140, 0, 255 });	
+		DrawModel(model, {0,0,0}, 1, mb_colors[rnd_index]);
 		if (global_draw_polygon_wires)
 			DrawModelWires(model, {0,0,0}, 1, BLACK);
 
@@ -644,6 +679,11 @@ void DrawMetaSpheres(MetaSphere *metaspheres, int count, float axis_step)
 				rlUnloadVertexBuffer(mesh.vboId[i]);
 		RL_FREE(mesh.vboId);
 		rlUnloadVertexArray(mesh.vaoId);
+
+		PROFILE_TIMER(compute_force, 0);
+		PROFILE_TIMER(collect_hot, 1);
+	PROFILE_TIMER(compute_vertex,2);
+	PROFILE_TIMER(fill_buffers,3);
 	}
 }
 
@@ -657,6 +697,38 @@ void GenerateSphere(Vector3 centerPos, float radius, int rings, int slices, Colo
 	Model sphere_model = LoadModelFromMesh(sphere_mesh);
 	DrawModelWires(sphere_model, centerPos, 1, color);
 	UnloadModel(sphere_model);
+}
+
+Shader MbLoadShader(const char *vsFileName, const char *fsFileName)
+{
+    Shader new_shader = LoadShader(vsFileName, fsFileName);
+	global_shader_valid = IsShaderValid(new_shader);
+	if (!global_shader_valid)
+	{
+		return {0};
+	}
+
+    // NOTE(raylib): Get some required shader locations
+    new_shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(new_shader, "viewPos");
+    // NOTE(raylib): "matModel" location name is automatically assigned on shader loading,
+    // no need to get the location again if using that uniform name
+    //shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(shader, "matModel");
+
+    // Ambient light level (some basic lighting)
+    int ambientLoc = GetShaderLocation(new_shader, "ambient");
+	float ambient_component = 5;
+	float ambient_value[4] = { ambient_component, ambient_component, ambient_component, 1.0f };
+    SetShaderValue(new_shader, ambientLoc, ambient_value, SHADER_UNIFORM_VEC4);
+
+    Light light = CreateLight(LIGHT_DIRECTIONAL, {0, 0, 0}, {0, -1, 0}, WHITE, new_shader);
+    //Light light1 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
+    //Light light2 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
+    //Light light3 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
+	
+	float startCameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
+	SetShaderValue(new_shader, new_shader.locs[SHADER_LOC_VECTOR_VIEW], startCameraPos, SHADER_UNIFORM_VEC3);
+
+	return new_shader;
 }
 
 int main()
@@ -705,28 +777,6 @@ int main()
 	InitWindow(screenWidth, screenHeight, "metaballs");
 	SetWindowState(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
 
-	rlDisableBackfaceCulling();
-    shader = LoadShader(TextFormat("shaders/glsl%i/lighting.vs", GLSL_VERSION),
-                               TextFormat("shaders/glsl%i/lighting.fs", GLSL_VERSION));
-	global_is_shader_valid = IsShaderValid(shader);
-    // NOTE(raylib): Get some required shader locations
-    shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(shader, "viewPos");
-    // NOTE(raylib): "matModel" location name is automatically assigned on shader loading,
-    // no need to get the location again if using that uniform name
-    //shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(shader, "matModel");
-	// NOTE: i dont know if it loads automaticly
-    //shader.locs[SHADER_LOC_COLOR_DIFFUSE] = GetShaderLocation(shader, "colDiffuse");
-
-    // Ambient light level (some basic lighting)
-    int ambientLoc = GetShaderLocation(shader, "ambient");
-	float ambient_component = 5;
-	float ambient_value[4] = { ambient_component, ambient_component, ambient_component, 1.0f };
-    SetShaderValue(shader, ambientLoc, ambient_value, SHADER_UNIFORM_VEC4);
-
-    Light light = CreateLight(LIGHT_DIRECTIONAL, {0, 0, 0}, {0, -1, 0}, WHITE, shader);
-    //Light light1 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
-    //Light light2 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
-    //Light light3 = CreateLight(LIGHT_DIRECTIONAL, {0, 10, 0}, {0, -1, 0}, BLANK, shader);
 
     camera.position = {0.0f, 10.0f, 10.0f};  // Camera position
     camera.target = {0.0f, 0.0f, 0.0f};      // Camera looking at point
@@ -734,20 +784,36 @@ int main()
     camera.fovy = 45.0f;                              // Camera field-of-view Y
     camera.projection = CAMERA_PERSPECTIVE;           // Camera mode type
 													  //
-	float startCameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
-	SetShaderValue(shader, shader.locs[SHADER_LOC_VECTOR_VIEW], startCameraPos, SHADER_UNIFORM_VEC3);
-	
 	Camera2D camera2d = { 0 };
 	camera2d.zoom = 2.0f; // Scales everything by 200%
+
+	rlDisableBackfaceCulling();
+#define VERTEX_SHADER   "shaders/glsl330/lighting.vs"
+#define FRAGMENT_SHADER "shaders/glsl330/lighting.fs"
+	shader = MbLoadShader(VERTEX_SHADER, FRAGMENT_SHADER);
+	global_shader_vs_mod_time = GetFileModTime(VERTEX_SHADER);
+	global_shader_fs_mod_time = GetFileModTime(FRAGMENT_SHADER);
 
     //DisableCursor();                    // Limit cursor to relative movement inside the window
     SetTargetFPS(60);
 
 	//Model sphere_model = LoadModel("sphere.obj");
 	//Assert(IsModelValid(sphere_model));
+	
+	MetaSphere metaspheres[MAX_METAOBJECT_COUNT] = {{{0,2,0}, 1}, {{2,2,0}, 1}};
+	//MetaSphere* selected_objects[ArrayCount(metaspheres)] = {0};
+	int metasphere_count = 2;
 
     while (!WindowShouldClose())
     {
+		if (global_shader_vs_mod_time != GetFileModTime(VERTEX_SHADER) ||
+			global_shader_fs_mod_time != GetFileModTime(FRAGMENT_SHADER))
+		{
+			shader = MbLoadShader(VERTEX_SHADER, FRAGMENT_SHADER);
+			global_shader_vs_mod_time = GetFileModTime(VERTEX_SHADER);
+			global_shader_fs_mod_time = GetFileModTime(FRAGMENT_SHADER);
+		}
+
 		if (IsKeyPressed(KEY_F))
 			ToggleFullscreen();
 
@@ -773,15 +839,64 @@ int main()
 		if (IsKeyPressed(KEY_X))
 			global_draw_coordinate_axis = !global_draw_coordinate_axis;
 
+		if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && metasphere_count < ArrayCount(metaspheres))
+		{
+			metaspheres[metasphere_count] = {Vector3Zero(), 1};
+			metasphere_count++;
+		}
+
 		//from below DrawRectangle(0, 0, 340, 200, { 232, 232, 232, 255 });
-		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+		if ((IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) ||
+			 GetMouseWheelMove() != 0.f) &&
 			!CheckCollisionRecs({0, 0, 340, 200}, {GetMousePosition().x, GetMousePosition().y, 0, 0}))
 		{
-			//UpdateCamera(&camera, CAMERA_THIRD_PERSON);
-			UpdateCamera(&camera, CAMERA_FREE);
+			UpdateCamera(&camera, CAMERA_THIRD_PERSON);
+			//UpdateCamera(&camera, CAMERA_FREE);
 			// Update the shader with the camera view vector (points towards { 0.0f, 0.0f, 0.0f })
 			float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
-			SetShaderValue(shader, shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
+			if (shader.locs != NULL)
+				SetShaderValue(shader, shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
+		}
+
+		//
+		// ================ Sphere picking ===========================
+		//
+		Ray mouse_ray = GetScreenToWorldRay(GetMousePosition(), camera);
+        RayCollision collision = { 0 };
+        //const char *hitObjectName = "None";
+        collision.distance = FLT_MAX;
+        collision.hit = false;
+        MetaSphere *collided = NULL;
+		for (int metasphere_index = 0; metasphere_index < metasphere_count; metasphere_index++)
+		{
+			MetaSphere metasphere = metaspheres[metasphere_index];
+			RayCollision sphereHitInfo = GetRayCollisionSphere(mouse_ray, metasphere.center, metasphere.radius);
+			if ((sphereHitInfo.hit) && (sphereHitInfo.distance < collision.distance))
+			{
+				collision = sphereHitInfo;
+				//cursorColor = ORANGE;
+				//hitObjectName = "Sphere";
+				collided = metaspheres + metasphere_index;	
+			}
+		}
+
+		if (collision.hit)
+		{
+			if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+			{
+				collided->flags |= MB_OBJECT_SELECTED;
+			}
+		}
+		else
+		{
+			if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+			{
+				for (int metasphere_index = 0; metasphere_index < metasphere_count; metasphere_index++)
+				{
+					MetaSphere *metasphere = &metaspheres[metasphere_index];
+					metasphere->flags &= ~MB_OBJECT_SELECTED;
+				}
+			}
 		}
 
 
@@ -789,7 +904,7 @@ int main()
 		{
 			ClearBackground(CLITERAL(Color){ 31, 31, 31, 255 });
 
-			static float grid_step = 1.49f;
+			static float grid_step = .5f;
             BeginMode3D(camera);
 			{
                 //DrawCube(cubePosition, 2.0f, 2.0f, 2.0f, RED);
@@ -811,7 +926,6 @@ int main()
 				}
 
 				static float speed = 0.02;
-				static MetaSphere metaspheres[2] = {{{0,2,0}, 1}, {{2,2,0}, 1}};
 				if (IsKeyDown(KEY_LEFT_SHIFT))
 					speed = 0.1;
 				if (IsKeyReleased(KEY_LEFT_SHIFT))
@@ -822,10 +936,26 @@ int main()
 				if (IsKeyDown(KEY_RIGHT))
 					metaspheres[1].center.x += speed;
 
-				if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+				// TODO: move code up
+				for (int metasphere_index = 0; metasphere_index < metasphere_count; metasphere_index++)
 				{
-					metaspheres[1].center.x += GetMouseDelta().x / 100.f;
-					metaspheres[1].center.y += -GetMouseDelta().y / 100.f;
+					MetaSphere *metasphere = &metaspheres[metasphere_index];
+					if (metasphere->flags & MB_OBJECT_SELECTED)
+					{
+						if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+						{
+							Vector3 camera_direction = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+							Vector3 plane_center = Vector3Project(metasphere->center, camera_direction);
+							Matrix rot = GetCameraMatrix(camera);
+
+							float coef = Vector3Distance(metasphere->center, camera.position) / 1500;
+							Vector3 x = Vector3Scale({rot.m0, rot.m4, rot.m8}, GetMouseDelta().x);
+							Vector3 y = Vector3Scale({rot.m1, rot.m5, rot.m9}, -GetMouseDelta().y);
+							Vector3 delta = Vector3Add(Vector3Scale(x, coef), Vector3Scale(y, coef));
+
+							metasphere->center = Vector3Add(metasphere->center, delta);
+						}
+					}
 				}
 
 				if (IsKeyDown(KEY_UP))
@@ -842,13 +972,41 @@ int main()
 				if (IsKeyPressed(KEY_EQUAL))
 					grid_step += 0.1;
 				
-				DrawMetaSpheres(metaspheres, 2, grid_step);
+				PROFILE_START(draw);
+				DrawMetaSpheres(metaspheres, metasphere_count, grid_step);
+				PROFILE_END(draw);
 				//DrawMetaSphere(metaspheres, 1, grid_step, Vector3Add({-1,-1,-1}, metaspheres[1].center));
 
 				//if (global_draw_backing_sphere)
 				//	DrawSphere({0, 0, 0}, 0.9, RED);
+				
+				if (collision.hit)
+                {
+                    //DrawCube(collision.point, 0.3f, 0.3f, 0.3f, GREEN);
+                    DrawCubeWires(collision.point, 0.3f, 0.3f, 0.3f, GREEN);
+					/*
+                    Vector3 normalEnd;
+                    normalEnd.x = collision.point.x + collision.normal.x;
+                    normalEnd.y = collision.point.y + collision.normal.y;
+                    normalEnd.z = collision.point.z + collision.normal.z;
+
+                    DrawLine3D(collision.point, normalEnd, RED);
+					*/
+                }
 			}
             EndMode3D();
+
+			for (int metasphere_index = 0; metasphere_index < metasphere_count; metasphere_index++)
+			{
+				MetaSphere *metasphere = &metaspheres[metasphere_index];
+				if (metasphere->flags & MB_OBJECT_SELECTED)
+				{
+					Vector2 selected_center = GetWorldToScreen(metasphere->center, camera);
+					// TODO: draw proper 3d circle, there is sphere distortion in corners
+					float selected_radius = 1 / Vector3Distance(metasphere->center, camera.position) * 1500;
+					DrawCircleLinesV(selected_center, selected_radius, GREEN);
+				}
+			}
 
 			float scale = 1.2; // Scale up by 150%
 
@@ -881,5 +1039,6 @@ int main()
 
     CloseWindow();
 
+	//while (true) {}
     return 0;
 }

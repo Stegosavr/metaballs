@@ -76,4 +76,5 @@ void main()
 
     // Gamma correction
     //finalColor = pow(finalColor, vec4(1.0/2.2));
+    //finalColor = pow(finalColor, vec4(0));
 }
